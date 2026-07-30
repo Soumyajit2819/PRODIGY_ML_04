@@ -6,12 +6,14 @@ for the Hand Gesture Recognition CNN task.
 """
 
 import os
+import shutil
 import numpy as np
 import cv2
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
+import kagglehub
 
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.utils import to_categorical
@@ -20,7 +22,6 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from utils import (
     data_path,
     outputs_path,
-    check_dataset_exists,
     ensure_dir,
     save_figure,
     set_plot_style,
@@ -36,6 +37,55 @@ IMG_SIZE     = 64        # resize images to 64 × 64
 NUM_CHANNELS = 1         # grayscale
 MAX_PER_CLASS = 500      # max images per gesture class (keep memory manageable)
 DATASET_DIR  = data_path("leapGestRecog")
+
+
+# ---------------------------------------------------------------------------
+# Dataset download
+# ---------------------------------------------------------------------------
+
+def download_dataset() -> str:
+    """
+    Download the LeapGestRecog dataset via kagglehub.
+    Places it at data/leapGestRecog/ and returns that path.
+    """
+    ensure_dir(data_path())
+
+    if os.path.isdir(DATASET_DIR) and len(os.listdir(DATASET_DIR)) > 0:
+        print(f"[INFO] Dataset already present → {DATASET_DIR}")
+        return DATASET_DIR
+
+    print("[INFO] Downloading LeapGestRecog dataset from Kaggle …")
+    dl_path = kagglehub.dataset_download("gti-upm/leapgestrecog")
+    print(f"[INFO] Downloaded to cache → {dl_path}")
+
+    # Walk to find the folder that contains subject subdirs with gesture images
+    # Structure: <dl_path>/leapGestRecog/<subject>/<gesture>/frame_*.png
+    target = None
+    for root, dirs, files in os.walk(dl_path):
+        # Look for a folder whose children contain image files
+        png_children = []
+        for d in dirs:
+            sub = os.path.join(root, d)
+            for _, subdirs2, _ in os.walk(sub):
+                for sd2 in subdirs2:
+                    sp2 = os.path.join(sub, sd2)
+                    if any(f.endswith('.png') for f in os.listdir(sp2) if os.path.isfile(os.path.join(sp2,f))):
+                        png_children.append(d)
+                        break
+                break
+        if len(png_children) >= 5:
+            target = root
+            break
+
+    if target is None:
+        target = dl_path
+
+    if not os.path.isdir(DATASET_DIR):
+        print(f"[INFO] Copying dataset from {target} → {DATASET_DIR}")
+        shutil.copytree(target, DATASET_DIR)
+        print(f"[INFO] Dataset ready → {DATASET_DIR}")
+
+    return DATASET_DIR
 TEST_SIZE    = 0.15
 VAL_SIZE     = 0.15
 RANDOM_SEED  = 42
@@ -47,13 +97,11 @@ RANDOM_SEED  = 42
 
 def load_images_from_dataset(dataset_dir: str, max_per_class: int = MAX_PER_CLASS) -> tuple:
     """
-    Walk leapGestRecog/ directory structure:
-      leapGestRecog/<gesture_class>/<subject>/frame_*.png
+    Walk leapGestRecog directory structure:
+      leapGestRecog/<subject_num>/<gesture_name>/frame_*.png
 
-    Parameters
-    ----------
-    dataset_dir   : path to data/leapGestRecog/
-    max_per_class : max images to load per gesture class
+    Discovers all unique gesture names, assigns integer class IDs,
+    and loads up to max_per_class images per gesture.
 
     Returns
     -------
@@ -61,48 +109,64 @@ def load_images_from_dataset(dataset_dir: str, max_per_class: int = MAX_PER_CLAS
     y         : np.ndarray  shape (N,)                         int
     label_map : dict  int → gesture name
     """
-    check_dataset_exists(dataset_dir)
+    if not os.path.isdir(dataset_dir):
+        raise FileNotFoundError(f"[ERROR] Dataset directory not found: {dataset_dir}")
 
-    # Discover gesture class folders (00, 01, … 09)
-    class_dirs = sorted([
-        d for d in os.listdir(dataset_dir)
-        if os.path.isdir(os.path.join(dataset_dir, d))
-    ])
-    label_map = build_label_map(class_dirs)
-    print(f"[INFO] Gesture classes found: {len(class_dirs)}")
+    # Discover all unique gesture folder names across subjects
+    # Gesture dirs have names like "01_palm", "02_l" etc (contain underscore)
+    # Subject dirs are pure numbers like "00", "01" etc — skip those as class labels
+    gesture_names = set()
+    for subject_dir in os.listdir(dataset_dir):
+        subject_path = os.path.join(dataset_dir, subject_dir)
+        if os.path.isdir(subject_path):
+            for gesture_dir in os.listdir(subject_path):
+                gesture_path = os.path.join(subject_path, gesture_dir)
+                # Only include dirs that look like gesture names (contain underscore)
+                if os.path.isdir(gesture_path) and "_" in gesture_dir:
+                    gesture_names.add(gesture_dir)
+
+    gesture_names = sorted(gesture_names)   # e.g. ['01_palm','02_l','03_fist',...]
+    label_map = {i: name for i, name in enumerate(gesture_names)}
+    name_to_id = {name: i for i, name in enumerate(gesture_names)}
+
+    print(f"[INFO] Gesture classes found: {len(gesture_names)}")
     for i, name in label_map.items():
         print(f"         Class {i:2d} → {name}")
 
     images, labels = [], []
+    class_counts = {name: 0 for name in gesture_names}
 
-    for class_idx, class_dir in enumerate(class_dirs):
-        class_path = os.path.join(dataset_dir, class_dir)
-        count = 0
-
-        # Walk all subject subdirectories
-        for root, _, files in os.walk(class_path):
-            for fname in sorted(files):
-                if count >= max_per_class:
+    # Walk: subject → gesture
+    for subject_dir in sorted(os.listdir(dataset_dir)):
+        subject_path = os.path.join(dataset_dir, subject_dir)
+        if not os.path.isdir(subject_path):
+            continue
+        for gesture_dir in sorted(os.listdir(subject_path)):
+            gesture_path = os.path.join(subject_path, gesture_dir)
+            if not os.path.isdir(gesture_path) or "_" not in gesture_dir or gesture_dir not in name_to_id:
+                continue
+            class_id = name_to_id[gesture_dir]
+            if class_counts[gesture_dir] >= max_per_class:
+                continue
+            for fname in sorted(os.listdir(gesture_path)):
+                if class_counts[gesture_dir] >= max_per_class:
                     break
                 if not fname.lower().endswith((".png", ".jpg", ".jpeg")):
                     continue
-
-                fpath = os.path.join(root, fname)
-                img   = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
+                fpath = os.path.join(gesture_path, fname)
+                img = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
                 if img is None:
                     continue
-
                 resized = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
                 images.append(resized)
-                labels.append(class_idx)
-                count += 1
-            if count >= max_per_class:
-                break
+                labels.append(class_id)
+                class_counts[gesture_dir] += 1
 
-        print(f"  Class {class_idx} ({label_map[class_idx]:<15}): {count} images loaded")
+    for name, count in class_counts.items():
+        print(f"  {name:<20}: {count} images loaded")
 
-    X = np.array(images, dtype=np.float32) / 255.0    # normalise [0, 1]
-    X = X[..., np.newaxis]                             # add channel dim → (N, 64, 64, 1)
+    X = np.array(images, dtype=np.float32) / 255.0
+    X = X[..., np.newaxis]   # (N, 64, 64, 1)
     y = np.array(labels, dtype=np.int32)
 
     print(f"\n[INFO] Dataset shape: X={X.shape}  y={y.shape}")
@@ -265,6 +329,9 @@ def run_preprocessing() -> tuple:
     label_map
     """
     ensure_dir(outputs_path())
+
+    print("[STEP] Downloading / locating dataset …")
+    download_dataset()
 
     print("[STEP] Loading images …")
     X, y, label_map = load_images_from_dataset(DATASET_DIR)

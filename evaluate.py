@@ -102,22 +102,20 @@ def plot_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray,
 
 def plot_per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                            label_map: dict) -> None:
-    """
-    Bar chart of per-class F1 scores.
-
-    Saves → outputs/per_class_f1.png
-    """
+    """Bar chart of per-class F1 scores. Saves → outputs/per_class_f1.png"""
     set_plot_style()
-    class_names = [label_map[i] for i in range(len(label_map))]
-    f1_scores   = f1_score(y_true, y_pred, average=None, zero_division=0)
+    num_classes = len(label_map)
+    class_names = [label_map[i] for i in range(num_classes)]
+    f1_scores   = f1_score(y_true, y_pred, average=None,
+                           zero_division=0, labels=list(range(num_classes)))
 
-    fig, ax = plt.subplots(figsize=(12, 5))
-    bars = ax.bar(class_names, f1_scores,
-                  color=sns.color_palette("tab10", n_colors=len(class_names)))
+    fig, ax = plt.subplots(figsize=(14, 5))
+    colors = sns.color_palette("tab10", n_colors=len(class_names))
+    bars = ax.bar(class_names, f1_scores, color=colors)
     for bar, score in zip(bars, f1_scores):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
                 f"{score:.2f}", ha="center", va="bottom", fontsize=9)
-    ax.set_ylim(0, 1.1)
+    ax.set_ylim(0, 1.15)
     ax.set_title("Per-Class F1 Score", fontsize=13, fontweight="bold")
     ax.set_ylabel("F1 Score")
     plt.xticks(rotation=30, ha="right")
